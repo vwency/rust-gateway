@@ -22,3 +22,6 @@ jsonwebtoken = { version = "10.1", default-features = false, features = ["use_pe
 anyhow = "1.0"
 serde_json = { version = "1.0.145" }
 async-trait =  { version="0.1.89" }
+validator = { version = "0.20.0", features = ["derive"] }
+bcrypt  = { version = "0.17.1" }
+uuid = { version = "1.18.1" }
