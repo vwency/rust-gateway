@@ -9,8 +9,20 @@ async-graphql = "7.0.17"
 async-graphql-actix-web = "7.0.17"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = { version="0.1.0" }
-async-graphql-actix-web = "7.0.17"
-tracing-subscriber = "0.3"
 tracing-actix-web = "0.7.19"
-cqrs-es = { version = "0.4.12" }
-postgres-es = { version="0.4.12" }
+redis = { version = "0.32.7", features = ["tokio-comp", "connection-manager"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+actix-cors = "0.7"
+dotenv = { version="0.15.0" } 
+serde = { version = "1.0", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2.0.17"
+argon2 = "0.5"
+jsonwebtoken = { version = "10.1", default-features = false, features = ["use_pem", "rust_crypto"] }
+anyhow = "1.0"
+serde_json = { version = "1.0.145" }
+async-trait =  { version="0.1.89" }
+validator = { version = "0.20.0", features = ["derive"] }
+bcrypt  = { version = "0.17.1" }
+uuid = { version = "1.18.1" }
+diesel = { version = "2.3.3" }
