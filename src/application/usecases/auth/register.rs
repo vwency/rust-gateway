@@ -23,7 +23,12 @@ impl RegisterUseCase {
         Self::validate_input(&input)?;
 
         let (identity, session) = kratos_client
-            .register(&input.email, &input.username, &input.password)
+            .register(
+                &input.email,
+                &input.username,
+                &input.password,
+                input.geo_location.as_deref(),
+            )
             .await
             .map_err(|e| format!("Failed to register: {}", e))?;
 
