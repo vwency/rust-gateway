@@ -1,6 +1,7 @@
 use crate::domain::entities::user::UserView;
 use async_trait::async_trait;
 
+#[allow(unused)]
 #[async_trait]
 pub trait UserRepository: Send + Sync {
     async fn create(&self, user: UserView) -> Result<UserView, String>;

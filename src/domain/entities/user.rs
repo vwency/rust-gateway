@@ -1,12 +1,14 @@
 use crate::infrastructure::adapters::kratos::kratos_client::KratosIdentity;
 use async_graphql::SimpleObject;
 
+#[allow(unused)]
 #[derive(SimpleObject, Clone)]
 pub struct AuthResponse {
     pub session_token: String,
     pub user: UserView,
 }
 
+#[allow(unused)]
 impl AuthResponse {
     pub fn from_kratos_identity(session_token: String, identity: KratosIdentity) -> Self {
         Self {

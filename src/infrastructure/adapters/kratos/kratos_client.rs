@@ -62,14 +62,12 @@ impl KratosClient {
         }
     }
 
-    /// Registration via browser flow (recommended)
     pub async fn register(
         &self,
         email: &str,
         username: &str,
         password: &str,
     ) -> Result<(KratosIdentity, KratosSession), Box<dyn std::error::Error>> {
-        // Initialize registration flow
         let flow_response = self
             .client
             .get(format!("{}/self-service/registration/api", self.public_url))
@@ -84,7 +82,6 @@ impl KratosClient {
         let flow: serde_json::Value = flow_response.json().await?;
         let flow_id = flow["id"].as_str().ok_or("Flow ID not found")?.to_string();
 
-        // Submit registration
         let registration_request = serde_json::json!({
             "method": "password",
             "traits": {
@@ -111,7 +108,6 @@ impl KratosClient {
 
         let response_data: serde_json::Value = response.json().await?;
 
-        // Extract session (created by the hook)
         let session = KratosSession {
             id: response_data["session"]["id"]
                 .as_str()
@@ -130,7 +126,6 @@ impl KratosClient {
                 .unwrap_or(false),
         };
 
-        // Extract identity
         let identity = KratosIdentity {
             id: response_data["identity"]["id"]
                 .as_str()
@@ -163,7 +158,7 @@ impl KratosClient {
         Ok((identity, session))
     }
 
-    /// Create identity via Admin API (without automatic session)
+    #[allow(unused)]
     pub async fn create_identity(
         &self,
         email: &str,
@@ -201,7 +196,6 @@ impl KratosClient {
         Ok(identity)
     }
 
-    /// Login
     pub async fn login(
         &self,
         identifier: &str,
@@ -217,7 +211,6 @@ impl KratosClient {
         let flow: serde_json::Value = flow_response.json().await?;
         let flow_id = flow["id"].as_str().ok_or("Flow ID not found")?.to_string();
 
-        // Submit credentials
         let login_request = serde_json::json!({
             "method": "password",
             "identifier": identifier,
@@ -260,7 +253,6 @@ impl KratosClient {
         Ok(session)
     }
 
-    /// Get identity information
     pub async fn get_identity(
         &self,
         identity_id: &str,
@@ -283,7 +275,7 @@ impl KratosClient {
         Ok(identity)
     }
 
-    /// Validate session
+    #[allow(unused)]
     pub async fn validate_session(
         &self,
         session_token: &str,
@@ -317,7 +309,7 @@ impl KratosClient {
         Ok(session)
     }
 
-    /// Logout
+    #[allow(unused)]
     pub async fn logout(&self, session_token: &str) -> Result<(), Box<dyn std::error::Error>> {
         let response = self
             .client
