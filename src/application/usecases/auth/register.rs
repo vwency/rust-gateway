@@ -1,9 +1,6 @@
-use crate::application::usecases::auth::jwt_service::JwtService;
 use crate::domain::auth::inputs::RegisterInput;
 use crate::domain::auth::responses::AuthResponse;
-use crate::domain::entities::user::User;
-use chrono::Utc;
-use uuid::Uuid;
+use crate::infrastructure::adapters::kratos::kratos_client::KratosClient;
 use validator::Validate;
 
 #[derive(Validate)]
@@ -19,7 +16,21 @@ struct RegisterValidation {
 pub struct RegisterUseCase;
 
 impl RegisterUseCase {
-    pub fn execute(input: RegisterInput, jwt_secret: &str) -> Result<AuthResponse, String> {
+    pub async fn execute(
+        input: RegisterInput,
+        kratos_client: &KratosClient,
+    ) -> Result<AuthResponse, String> {
+        Self::validate_input(&input)?;
+
+        let (identity, session) = kratos_client
+            .register(&input.email, &input.username, &input.password)
+            .await
+            .map_err(|e| format!("Failed to register: {}", e))?;
+
+        Ok(AuthResponse::from_kratos_identity(session.token, identity))
+    }
+
+    fn validate_input(input: &RegisterInput) -> Result<(), String> {
         let validation = RegisterValidation {
             email: input.email.clone(),
             username: input.username.clone(),
@@ -29,24 +40,6 @@ impl RegisterUseCase {
         validation
             .validate()
             .map_err(|e| format!("Validation error: {}", e))?;
-
-        let user_id = Uuid::new_v4().to_string();
-        let now = Utc::now();
-
-        let user = User {
-            id: user_id.clone(),
-            email: input.email.clone(),
-            login: input.username,
-            password_hash: String::new(),
-            created_at: now,
-            updated_at: now,
-        };
-
-        let token = JwtService::generate_token(&user.id, &user.email, jwt_secret)?;
-
-        Ok(AuthResponse {
-            token,
-            user: user.into(),
-        })
+        Ok(())
     }
 }
