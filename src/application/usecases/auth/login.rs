@@ -11,26 +11,18 @@ impl LoginUseCase {
     ) -> Result<AuthResponse, String> {
         Self::validate_input(&input)?;
 
-        // Определяем идентификатор (email или username)
         let identifier = input
             .email
             .as_ref()
             .or(input.username.as_ref())
             .ok_or("Email or username required")?;
 
-        // Аутентификация через Kratos
-        let session = kratos_client
+        let result = kratos_client
             .login(identifier, &input.password)
             .await
             .map_err(|e| format!("Login failed: {}", e))?;
 
-        // Получаем информацию об identity
-        let identity = kratos_client
-            .get_identity(&session.identity_id)
-            .await
-            .map_err(|e| format!("Failed to get identity: {}", e))?;
-
-        Ok(AuthResponse::from_kratos_identity(session.token, identity))
+        Ok(AuthResponse::from_kratos_auth_result(result))
     }
 
     fn validate_input(input: &LoginInput) -> Result<(), String> {

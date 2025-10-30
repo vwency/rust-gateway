@@ -1,65 +1,27 @@
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use ory_client::{
+    apis::{configuration::Configuration, frontend_api, identity_api},
+    models::{Identity, PerformNativeLogoutBody, Session, UpdateLoginFlowBody},
+};
 
 #[derive(Clone)]
 pub struct KratosClient {
-    client: Client,
-    admin_url: String,
+    config: Configuration,
     public_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KratosIdentity {
-    pub id: String,
-    pub schema_id: String,
-    pub traits: IdentityTraits,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdentityTraits {
-    pub email: String,
-    pub username: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KratosSession {
-    pub id: String,
-    pub token: String,
-    pub identity_id: String,
-    pub active: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct CreateIdentityRequest {
-    schema_id: String,
-    traits: IdentityTraits,
-    credentials: Credentials,
-}
-
-#[derive(Debug, Serialize)]
-struct Credentials {
-    password: PasswordCredentials,
-}
-
-#[derive(Debug, Serialize)]
-struct PasswordCredentials {
-    config: PasswordConfig,
-}
-
-#[derive(Debug, Serialize)]
-struct PasswordConfig {
-    password: String,
+#[derive(Debug, Clone)]
+pub struct KratosAuthResult {
+    pub identity: Identity,
+    pub session: Session,
+    pub session_token: String,
 }
 
 impl KratosClient {
     pub fn new(admin_url: String, public_url: String) -> Self {
-        Self {
-            client: Client::new(),
-            admin_url,
-            public_url,
-        }
+        let mut config = Configuration::new();
+        config.base_path = admin_url;
+
+        Self { config, public_url }
     }
 
     pub async fn register(
@@ -67,262 +29,179 @@ impl KratosClient {
         email: &str,
         username: &str,
         password: &str,
-    ) -> Result<(KratosIdentity, KratosSession), Box<dyn std::error::Error>> {
-        let flow_response = self
-            .client
-            .get(format!("{}/self-service/registration/api", self.public_url))
-            .send()
-            .await?;
+        geo_location: Option<&str>,
+    ) -> Result<KratosAuthResult, Box<dyn std::error::Error>> {
+        let mut public_config = Configuration::new();
+        public_config.base_path = self.public_url.clone();
 
-        if !flow_response.status().is_success() {
-            let error_text = flow_response.text().await?;
-            return Err(format!("Failed to initialize registration flow: {}", error_text).into());
-        }
+        let registration_flow =
+            frontend_api::create_native_registration_flow(&public_config, None, None, None, None)
+                .await?;
 
-        let flow: serde_json::Value = flow_response.json().await?;
-        let flow_id = flow["id"].as_str().ok_or("Flow ID not found")?.to_string();
+        // Log the registration flow response for debugging
+        println!("Registration flow response: {:?}", registration_flow);
 
-        let registration_request = serde_json::json!({
-            "method": "password",
-            "traits": {
-                "email": email,
-                "username": username
-            },
-            "password": password,
+        let csrf_token = registration_flow
+            .ui
+            .nodes
+            .iter()
+            .find_map(|node| {
+                let attrs_json = serde_json::to_value(&*node.attributes).ok()?;
+                let attrs = attrs_json.as_object()?;
+                if attrs.get("name")?.as_str()? == "csrf_token" {
+                    return attrs.get("value")?.as_str().map(|s| s.to_string());
+                }
+                None
+            })
+            .unwrap_or_default();
+
+        let mut traits = serde_json::json!({
+            "email": email,
+            "username": username
         });
 
-        let response = self
-            .client
-            .post(format!(
-                "{}/self-service/registration?flow={}",
-                self.public_url, flow_id
-            ))
-            .json(&registration_request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(format!("Registration failed: {}", error_text).into());
+        if let Some(geo) = geo_location {
+            traits["geo_location"] = serde_json::json!(geo);
         }
 
-        let response_data: serde_json::Value = response.json().await?;
+        let registration_body_json = serde_json::json!({
+            "method": "password",
+            "password": password,
+            "traits": traits,
+            "csrf_token": csrf_token,
+        });
 
-        let session = KratosSession {
-            id: response_data["session"]["id"]
-                .as_str()
-                .ok_or("Session ID not found")?
-                .to_string(),
-            token: response_data["session_token"]
-                .as_str()
-                .ok_or("Session token not found")?
-                .to_string(),
-            identity_id: response_data["session"]["identity"]["id"]
-                .as_str()
-                .ok_or("Identity ID not found")?
-                .to_string(),
-            active: response_data["session"]["active"]
-                .as_bool()
-                .unwrap_or(false),
+        let update_body = serde_json::from_value(registration_body_json)?;
+
+        let result = frontend_api::update_registration_flow(
+            &public_config,
+            &registration_flow.id,
+            update_body,
+            None,
+        )
+        .await?;
+
+        let session = match result.session {
+            Some(session_box) => *session_box,
+            None => return Err("No session returned".into()),
         };
 
-        let identity = KratosIdentity {
-            id: response_data["identity"]["id"]
-                .as_str()
-                .ok_or("Identity ID not found")?
-                .to_string(),
-            schema_id: response_data["identity"]["schema_id"]
-                .as_str()
-                .unwrap_or("default")
-                .to_string(),
-            traits: IdentityTraits {
-                email: response_data["identity"]["traits"]["email"]
-                    .as_str()
-                    .ok_or("Email not found")?
-                    .to_string(),
-                username: response_data["identity"]["traits"]["username"]
-                    .as_str()
-                    .ok_or("Username not found")?
-                    .to_string(),
-            },
-            created_at: response_data["identity"]["created_at"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
-            updated_at: response_data["identity"]["updated_at"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
+        let session_token = match result.session_token {
+            Some(token) => token,
+            None => return Err("No session token returned".into()),
         };
 
-        Ok((identity, session))
-    }
-
-    #[allow(unused)]
-    pub async fn create_identity(
-        &self,
-        email: &str,
-        username: &str,
-        password: &str,
-    ) -> Result<KratosIdentity, Box<dyn std::error::Error>> {
-        let request = CreateIdentityRequest {
-            schema_id: "default".to_string(),
-            traits: IdentityTraits {
-                email: email.to_string(),
-                username: username.to_string(),
-            },
-            credentials: Credentials {
-                password: PasswordCredentials {
-                    config: PasswordConfig {
-                        password: password.to_string(),
-                    },
-                },
-            },
+        let identity_id = match session.identity.as_ref() {
+            Some(identity) => identity.id.clone(),
+            None => return Err("No identity in session".into()),
         };
 
-        let response = self
-            .client
-            .post(format!("{}/admin/identities", self.admin_url))
-            .json(&request)
-            .send()
-            .await?;
+        let identity = self.get_identity(&identity_id).await?;
 
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(format!("Kratos error: {}", error_text).into());
-        }
-
-        let identity: KratosIdentity = response.json().await?;
-        Ok(identity)
+        Ok(KratosAuthResult {
+            identity,
+            session,
+            session_token,
+        })
     }
 
     pub async fn login(
         &self,
         identifier: &str,
         password: &str,
-    ) -> Result<KratosSession, Box<dyn std::error::Error>> {
-        // Initialize login flow
-        let flow_response = self
-            .client
-            .get(format!("{}/self-service/login/api", self.public_url))
-            .send()
-            .await?;
+    ) -> Result<KratosAuthResult, Box<dyn std::error::Error>> {
+        let mut public_config = Configuration::new();
+        public_config.base_path = self.public_url.clone();
 
-        let flow: serde_json::Value = flow_response.json().await?;
-        let flow_id = flow["id"].as_str().ok_or("Flow ID not found")?.to_string();
+        let login_flow = frontend_api::create_native_login_flow(
+            &public_config,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
 
-        let login_request = serde_json::json!({
+        let csrf_token = login_flow
+            .ui
+            .nodes
+            .iter()
+            .find_map(|node| {
+                let attrs_json = serde_json::to_value(&*node.attributes).ok()?;
+                let attrs = attrs_json.as_object()?;
+                if attrs.get("name")?.as_str()? == "csrf_token" {
+                    return attrs.get("value")?.as_str().map(|s| s.to_string());
+                }
+                None
+            })
+            .unwrap_or_default();
+
+        let login_body_json = serde_json::json!({
             "method": "password",
             "identifier": identifier,
             "password": password,
+            "csrf_token": csrf_token,
         });
 
-        let response = self
-            .client
-            .post(format!(
-                "{}/self-service/login?flow={}",
-                self.public_url, flow_id
-            ))
-            .json(&login_request)
-            .send()
-            .await?;
+        let login_body: UpdateLoginFlowBody = serde_json::from_value(login_body_json)?;
 
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(format!("Login failed: {}", error_text).into());
-        }
+        let result =
+            frontend_api::update_login_flow(&public_config, &login_flow.id, login_body, None, None)
+                .await?;
 
-        let session_data: serde_json::Value = response.json().await?;
-
-        let session = KratosSession {
-            id: session_data["session"]["id"]
-                .as_str()
-                .ok_or("Session ID not found")?
-                .to_string(),
-            token: session_data["session_token"]
-                .as_str()
-                .ok_or("Session token not found")?
-                .to_string(),
-            identity_id: session_data["session"]["identity"]["id"]
-                .as_str()
-                .ok_or("Identity ID not found")?
-                .to_string(),
-            active: session_data["session"]["active"].as_bool().unwrap_or(false),
+        let session = *result.session;
+        let session_token = match result.session_token {
+            Some(token) => token,
+            None => return Err("No session token returned".into()),
         };
 
-        Ok(session)
+        let identity_id = match session.identity.as_ref() {
+            Some(identity) => identity.id.clone(),
+            None => return Err("No identity in session".into()),
+        };
+
+        let identity = self.get_identity(&identity_id).await?;
+
+        Ok(KratosAuthResult {
+            identity,
+            session,
+            session_token,
+        })
     }
 
     pub async fn get_identity(
         &self,
         identity_id: &str,
-    ) -> Result<KratosIdentity, Box<dyn std::error::Error>> {
-        let response = self
-            .client
-            .get(format!(
-                "{}/admin/identities/{}",
-                self.admin_url, identity_id
-            ))
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(format!("Failed to get identity: {}", error_text).into());
-        }
-
-        let identity: KratosIdentity = response.json().await?;
+    ) -> Result<Identity, Box<dyn std::error::Error>> {
+        let identity = identity_api::get_identity(&self.config, identity_id, None).await?;
         Ok(identity)
     }
 
-    #[allow(unused)]
     pub async fn validate_session(
         &self,
         session_token: &str,
-    ) -> Result<KratosSession, Box<dyn std::error::Error>> {
-        let response = self
-            .client
-            .get(format!("{}/sessions/whoami", self.public_url))
-            .header("Authorization", format!("Bearer {}", session_token))
-            .send()
-            .await?;
+    ) -> Result<Session, Box<dyn std::error::Error>> {
+        let mut config = self.config.clone();
+        config.bearer_access_token = Some(session_token.to_string());
 
-        if !response.status().is_success() {
-            return Err("Invalid session".into());
-        }
-
-        let session_data: serde_json::Value = response.json().await?;
-
-        let session = KratosSession {
-            id: session_data["id"]
-                .as_str()
-                .ok_or("Session ID not found")?
-                .to_string(),
-            token: session_token.to_string(),
-            identity_id: session_data["identity"]["id"]
-                .as_str()
-                .ok_or("Identity ID not found")?
-                .to_string(),
-            active: session_data["active"].as_bool().unwrap_or(false),
-        };
+        let session = frontend_api::to_session(&config, Some(session_token), None, None).await?;
 
         Ok(session)
     }
 
-    #[allow(unused)]
     pub async fn logout(&self, session_token: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let response = self
-            .client
-            .delete(format!("{}/sessions", self.public_url))
-            .header("Authorization", format!("Bearer {}", session_token))
-            .send()
-            .await?;
+        let mut config = self.config.clone();
+        config.bearer_access_token = Some(session_token.to_string());
 
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(format!("Logout failed: {}", error_text).into());
-        }
+        let logout_body = PerformNativeLogoutBody {
+            session_token: session_token.to_string(),
+        };
 
+        frontend_api::perform_native_logout(&config, logout_body).await?;
         Ok(())
     }
 }
