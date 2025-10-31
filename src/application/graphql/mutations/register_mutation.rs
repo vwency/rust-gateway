@@ -1,6 +1,7 @@
 use crate::application::usecases::auth::register::RegisterUseCase;
 use crate::domain::auth::inputs::RegisterInput;
 use crate::domain::auth::responses::AuthResponse;
+use crate::infrastructure::adapters::graphql::response_cookies::ResponseCookies;
 use crate::infrastructure::adapters::kratos::kratos_client::KratosClient;
 use async_graphql::{Context, Object, Result};
 
@@ -17,8 +18,19 @@ impl RegisterMutation {
             )
         });
 
-        RegisterUseCase::execute(input, &kratos_client)
+        let (auth_response, session_token) = RegisterUseCase::execute(input, &kratos_client)
             .await
-            .map_err(|e| async_graphql::Error::new(e))
+            .map_err(|e| async_graphql::Error::new(e))?;
+
+        if let Some(response_cookies) = ctx.data_opt::<ResponseCookies>() {
+            let cookie = format!(
+                "ory_kratos_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+                session_token,
+                60 * 60 * 24 * 7 // 7 дней
+            );
+            response_cookies.add_cookie(cookie).await;
+        }
+
+        Ok(auth_response)
     }
 }

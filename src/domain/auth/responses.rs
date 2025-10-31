@@ -3,16 +3,20 @@ use async_graphql::SimpleObject;
 
 #[derive(SimpleObject, Clone)]
 pub struct AuthResponse {
-    pub session_token: String,
+    // Убираем session_token из GraphQL ответа, так как он будет в cookie
     pub user: UserView,
 }
 
 impl AuthResponse {
-    pub fn from_kratos_identity(session_token: String, identity: KratosIdentity) -> Self {
+    pub fn from_kratos_identity(identity: KratosIdentity) -> Self {
         Self {
-            session_token,
             user: UserView::from(identity),
         }
+    }
+
+    // Добавляем метод для получения токена (используется внутри)
+    pub fn with_token(identity: KratosIdentity, _token: String) -> (Self, String) {
+        (Self::from_kratos_identity(identity), _token)
     }
 }
 

@@ -19,7 +19,7 @@ impl RegisterUseCase {
     pub async fn execute(
         input: RegisterInput,
         kratos_client: &KratosClient,
-    ) -> Result<AuthResponse, String> {
+    ) -> Result<(AuthResponse, String), String> {
         Self::validate_input(&input)?;
 
         let (identity, session) = kratos_client
@@ -27,7 +27,8 @@ impl RegisterUseCase {
             .await
             .map_err(|e| format!("Failed to register: {}", e))?;
 
-        Ok(AuthResponse::from_kratos_identity(session.token, identity))
+        let session_token = session.token.clone();
+        Ok((AuthResponse::from_kratos_identity(identity), session_token))
     }
 
     fn validate_input(input: &RegisterInput) -> Result<(), String> {
