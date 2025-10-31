@@ -1,4 +1,4 @@
-use reqwest::Client;
+use reqwest::{Client, header};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
@@ -21,6 +21,8 @@ pub struct KratosIdentity {
 pub struct IdentityTraits {
     pub email: String,
     pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geo_location: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +31,13 @@ pub struct KratosSession {
     pub token: String,
     pub identity_id: String,
     pub active: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct KratosAuthResult {
+    pub identity: KratosIdentity,
+    pub session: KratosSession,
+    pub session_cookie: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,8 +64,13 @@ struct PasswordConfig {
 
 impl KratosClient {
     pub fn new(admin_url: String, public_url: String) -> Self {
+        let client = Client::builder()
+            .cookie_store(true)
+            .build()
+            .expect("Failed to build HTTP client");
+
         Self {
-            client: Client::new(),
+            client,
             admin_url,
             public_url,
         }
@@ -67,6 +81,7 @@ impl KratosClient {
         email: &str,
         username: &str,
         password: &str,
+        geo_location: Option<&str>,
     ) -> Result<(KratosIdentity, KratosSession), Box<dyn std::error::Error>> {
         let flow_response = self
             .client
@@ -82,12 +97,18 @@ impl KratosClient {
         let flow: serde_json::Value = flow_response.json().await?;
         let flow_id = flow["id"].as_str().ok_or("Flow ID not found")?.to_string();
 
+        let mut traits = serde_json::json!({
+            "email": email,
+            "username": username
+        });
+
+        if let Some(geo) = geo_location {
+            traits["geo_location"] = serde_json::json!(geo);
+        }
+
         let registration_request = serde_json::json!({
             "method": "password",
-            "traits": {
-                "email": email,
-                "username": username
-            },
+            "traits": traits,
             "password": password,
         });
 
@@ -108,6 +129,55 @@ impl KratosClient {
 
         let response_data: serde_json::Value = response.json().await?;
 
+        // ДОБАВЬТЕ ЛОГИРОВАНИЕ ДЛЯ ОТЛАДКИ
+        println!(
+            "Kratos registration response: {}",
+            serde_json::to_string_pretty(&response_data)?
+        );
+
+        // Проверяем, есть ли вообще сессия в ответе
+        if response_data["session"].is_null() {
+            // Если сессии нет, создаем её через отдельный запрос
+            let identity_id = response_data["identity"]["id"]
+                .as_str()
+                .ok_or("Identity ID not found")?;
+
+            // Теперь логинимся, чтобы получить сессию
+            let session = self.login(email, password).await?;
+
+            let identity = KratosIdentity {
+                id: identity_id.to_string(),
+                schema_id: response_data["identity"]["schema_id"]
+                    .as_str()
+                    .unwrap_or("default")
+                    .to_string(),
+                traits: IdentityTraits {
+                    email: response_data["identity"]["traits"]["email"]
+                        .as_str()
+                        .ok_or("Email not found")?
+                        .to_string(),
+                    username: response_data["identity"]["traits"]["username"]
+                        .as_str()
+                        .ok_or("Username not found")?
+                        .to_string(),
+                    geo_location: response_data["identity"]["traits"]["geo_location"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                },
+                created_at: response_data["identity"]["created_at"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+                updated_at: response_data["identity"]["updated_at"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+            };
+
+            return Ok((identity, session));
+        }
+
+        // Если сессия есть в ответе, обрабатываем как раньше
         let session = KratosSession {
             id: response_data["session"]["id"]
                 .as_str()
@@ -144,6 +214,9 @@ impl KratosClient {
                     .as_str()
                     .ok_or("Username not found")?
                     .to_string(),
+                geo_location: response_data["identity"]["traits"]["geo_location"]
+                    .as_str()
+                    .map(|s| s.to_string()),
             },
             created_at: response_data["identity"]["created_at"]
                 .as_str()
@@ -157,51 +230,11 @@ impl KratosClient {
 
         Ok((identity, session))
     }
-
-    #[allow(unused)]
-    pub async fn create_identity(
-        &self,
-        email: &str,
-        username: &str,
-        password: &str,
-    ) -> Result<KratosIdentity, Box<dyn std::error::Error>> {
-        let request = CreateIdentityRequest {
-            schema_id: "default".to_string(),
-            traits: IdentityTraits {
-                email: email.to_string(),
-                username: username.to_string(),
-            },
-            credentials: Credentials {
-                password: PasswordCredentials {
-                    config: PasswordConfig {
-                        password: password.to_string(),
-                    },
-                },
-            },
-        };
-
-        let response = self
-            .client
-            .post(format!("{}/admin/identities", self.admin_url))
-            .json(&request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(format!("Kratos error: {}", error_text).into());
-        }
-
-        let identity: KratosIdentity = response.json().await?;
-        Ok(identity)
-    }
-
     pub async fn login(
         &self,
         identifier: &str,
         password: &str,
     ) -> Result<KratosSession, Box<dyn std::error::Error>> {
-        // Initialize login flow
         let flow_response = self
             .client
             .get(format!("{}/self-service/login/api", self.public_url))
@@ -275,7 +308,6 @@ impl KratosClient {
         Ok(identity)
     }
 
-    #[allow(unused)]
     pub async fn validate_session(
         &self,
         session_token: &str,
@@ -309,7 +341,6 @@ impl KratosClient {
         Ok(session)
     }
 
-    #[allow(unused)]
     pub async fn logout(&self, session_token: &str) -> Result<(), Box<dyn std::error::Error>> {
         let response = self
             .client

@@ -1,6 +1,6 @@
 version: v1.0.0
 
-dsn: memory
+dsn: postgres://kratos:kratos_secret@postgres-kratos:5432/kratos?sslmode=disable
 
 serve:
   public:
@@ -20,11 +20,28 @@ serve:
       allowed_headers:
         - Authorization
         - Content-Type
+        - Cookie
       exposed_headers:
         - Content-Type
+        - Set-Cookie
       allow_credentials: true
+    host: 0.0.0.0
+    port: 4433
   admin:
-    base_url: http://kratos:4434/
+    base_url: http://localhost:4434/
+    host: 0.0.0.0
+    port: 4434
+
+session:
+  cookie:
+    domain: localhost
+    path: /
+    same_site: Lax
+    persistent: true
+  lifespan: 24h
+  earliest_possible_extend: 1h
+  whoami:
+    required_aal: aal1
 
 selfservice:
   default_browser_return_url: http://localhost:3000/
@@ -71,14 +88,12 @@ selfservice:
     login:
       ui_url: http://localhost:3000/login
       lifespan: 10m
+      # Убрали секцию after - сессия создается автоматически
 
     registration:
       lifespan: 10m
       ui_url: http://localhost:3000/registration
-      after:
-        password:
-          hooks:
-            - hook: session
+      # Убрали секцию after - сессия создается автоматически
 
 log:
   level: debug
