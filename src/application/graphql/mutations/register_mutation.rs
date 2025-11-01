@@ -11,26 +11,22 @@ pub struct RegisterMutation;
 #[Object]
 impl RegisterMutation {
     async fn register(&self, ctx: &Context<'_>, input: RegisterInput) -> Result<AuthResponse> {
-        let kratos_client = ctx.data_opt::<KratosClient>().cloned().unwrap_or_else(|| {
-            KratosClient::new(
-                "http://localhost:4434".to_string(),
-                "http://localhost:4433".to_string(),
-            )
-        });
+        let kratos_client = ctx.data_unchecked::<KratosClient>();
 
-        let cookie = ctx.data_opt::<String>().map(|s| s.as_str());
+        // Get cookie from context
+        let cookie = ctx
+            .data_opt::<Option<String>>()
+            .and_then(|opt| opt.as_ref())
+            .map(|s| s.as_str());
 
-        let auth_response = RegisterUseCase::execute(input, &kratos_client, cookie)
+        let (auth_response, cookies) = RegisterUseCase::execute(input, kratos_client, cookie)
             .await
-            .map_err(|e| async_graphql::Error::new(e))?;
+            .map_err(async_graphql::Error::new)?;
 
         if let Some(response_cookies) = ctx.data_opt::<ResponseCookies>() {
-            let cookie = format!(
-                "ory_kratos_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-                auth_response.session_token,
-                60 * 60 * 24 * 7
-            );
-            response_cookies.add_cookie(cookie).await;
+            for cookie_str in cookies {
+                response_cookies.add_cookie(cookie_str).await;
+            }
         }
 
         Ok(auth_response)

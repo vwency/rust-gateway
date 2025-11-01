@@ -20,7 +20,7 @@ impl RegisterUseCase {
         input: RegisterInput,
         kratos_client: &KratosClient,
         cookie: Option<&str>,
-    ) -> Result<AuthResponse, String> {
+    ) -> Result<(AuthResponse, Vec<String>), String> {
         Self::validate_input(&input)?;
 
         let (session, cookies) = kratos_client
@@ -28,11 +28,9 @@ impl RegisterUseCase {
             .await
             .map_err(|e| format!("Failed to register: {}", e))?;
 
-        let session_token = cookies.get(0).cloned().unwrap_or_default();
-
-        Ok(AuthResponse::from_kratos_identity(
-            session.identity,
-            session_token,
+        Ok((
+            AuthResponse::from_kratos_identity(session.identity, String::new()),
+            cookies,
         ))
     }
 

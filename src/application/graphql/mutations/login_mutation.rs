@@ -11,19 +11,19 @@ pub struct LoginMutation;
 #[Object]
 impl LoginMutation {
     async fn login(&self, ctx: &Context<'_>, input: LoginInput) -> Result<AuthResponse> {
-        let kratos_client = ctx.data_opt::<KratosClient>().cloned().unwrap_or_else(|| {
-            KratosClient::new(
-                "http://localhost:4434".to_string(),
-                "http://localhost:4433".to_string(),
-            )
-        });
+        let kratos_client = ctx.data_unchecked::<KratosClient>();
 
-        let cookie = ctx.data_opt::<String>().map(|s| s.as_str());
+        // ✅ Правильное извлечение cookie из контекста
+        let cookie = ctx
+            .data_opt::<Option<String>>()
+            .and_then(|opt| opt.as_ref())
+            .map(|s| s.as_str());
 
-        let (auth_response, cookies) = LoginUseCase::execute(input, &kratos_client, cookie)
+        let (auth_response, cookies) = LoginUseCase::execute(input, kratos_client, cookie)
             .await
-            .map_err(|e| async_graphql::Error::new(e))?;
+            .map_err(async_graphql::Error::new)?;
 
+        // ✅ Добавляем новые cookies в ответ
         if let Some(response_cookies) = ctx.data_opt::<ResponseCookies>() {
             for cookie_str in cookies {
                 response_cookies.add_cookie(cookie_str).await;
