@@ -6,7 +6,7 @@ use tracing_actix_web::TracingLogger;
 use crate::application::handlers::{auth, health_check};
 
 pub async fn start() -> std::io::Result<()> {
-    info!("Booting HTTP server at http://127.0.0.1:3000");
+    info!("Booting HTTP server at http://127.0.0.1:8080");
 
     let server = HttpServer::new(|| {
         App::new()
@@ -21,9 +21,9 @@ pub async fn start() -> std::io::Result<()> {
             .configure(health_check::configure)
             .configure(auth::configure)
     })
-    .bind(("127.0.0.1", 3000))?;
+    .bind(("127.0.0.1", 8080))?;
 
-    info!("✅ HTTP server successfully started on http://127.0.0.1:3000");
+    info!("✅ HTTP server successfully started on http://127.0.0.1:8080");
 
     server.run().await
 }

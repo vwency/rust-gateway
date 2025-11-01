@@ -1,184 +1,408 @@
-use ory_kratos_client::{
-    apis::{
-        configuration::Configuration,
-        frontend_api::{
-            create_browser_login_flow, create_browser_logout_flow, create_browser_recovery_flow,
-            create_browser_registration_flow, to_session, update_login_flow, update_recovery_flow,
-            update_registration_flow,
-        },
-    },
-    models::{UpdateLoginFlowBody, UpdateRecoveryFlowBody, UpdateRegistrationFlowBody},
-};
-use serde::Serialize;
-use serde_json::json;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::error::Error;
+use std::fmt;
 
-#[derive(Debug, Clone)]
-pub struct KratosConfig {
-    pub base_path: String,
+#[derive(Debug)]
+pub enum AuthError {
+    NetworkError(String),
+    KratosError(String),
+    ValidationError(String),
+    SerializationError(String),
+    Unauthorized,
 }
 
-impl Default for KratosConfig {
-    fn default() -> Self {
-        let base_path =
-            std::env::var("KRATOS_URL").unwrap_or_else(|_| "http://localhost:4433".to_string());
-
-        tracing::info!("🔧 Using Kratos URL: {}", base_path);
-
-        Self { base_path }
-    }
-}
-
-impl KratosConfig {
-    fn get_configuration(&self) -> Configuration {
-        Configuration {
-            base_path: self.base_path.clone(),
-            ..Default::default()
+impl fmt::Display for AuthError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            AuthError::NetworkError(msg) => write!(f, "Network error: {}", msg),
+            AuthError::KratosError(msg) => write!(f, "Kratos error: {}", msg),
+            AuthError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
+            AuthError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
+            AuthError::Unauthorized => write!(f, "Unauthorized"),
         }
     }
 }
 
-#[derive(Debug, Serialize)]
+impl Error for AuthError {}
+
+impl From<reqwest::Error> for AuthError {
+    fn from(err: reqwest::Error) -> Self {
+        AuthError::NetworkError(err.to_string())
+    }
+}
+
+impl From<serde_json::Error> for AuthError {
+    fn from(err: serde_json::Error) -> Self {
+        AuthError::SerializationError(err.to_string())
+    }
+}
+
+// ============================================================================
+// Domain Models
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Identity {
+    pub id: String,
+    pub schema_id: String,
+    pub traits: Value,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub id: String,
+    pub active: bool,
+    pub identity: Identity,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub authenticated_at: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct SignupResponse {
+    pub identity: Identity,
+    pub session: Option<Session>,
+    pub session_token: Option<String>,
+}
+
+#[derive(Debug)]
 pub struct LoginResponse {
-    pub session: serde_json::Value,
-    pub session_cookie: Option<String>,
+    pub session: Session,
+    pub session_token: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct RegistrationResponse {
-    pub identity: serde_json::Value,
-    pub session_cookie: Option<String>,
+// ============================================================================
+// Kratos Client
+// ============================================================================
+
+#[derive(Clone)]
+struct KratosClient {
+    client: Client,
+    base_url: String,
 }
 
-// Объединенный use case для регистрации (signup)
+impl KratosClient {
+    fn new() -> Self {
+        let base_url = std::env::var("KRATOS_PUBLIC_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:4433".to_string());
+
+        Self {
+            client: Client::new(),
+            base_url,
+        }
+    }
+
+    async fn create_registration_flow(&self, cookie: Option<String>) -> Result<Value, AuthError> {
+        let url = format!("{}/self-service/registration/api", self.base_url);
+
+        let mut request = self.client.get(&url);
+
+        if let Some(cookie) = cookie {
+            request = request.header("Cookie", cookie);
+        }
+
+        let response = request.send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AuthError::KratosError(format!(
+                "Failed to create registration flow: {} - {}",
+                status, text
+            )));
+        }
+
+        let flow: Value = response.json().await?;
+        Ok(flow)
+    }
+
+    async fn submit_registration(
+        &self,
+        flow_id: &str,
+        email: String,
+        password: String,
+        traits: Value,
+        cookie: Option<String>,
+    ) -> Result<(Identity, Option<Session>, Option<String>), AuthError> {
+        let url = format!(
+            "{}/self-service/registration?flow={}",
+            self.base_url, flow_id
+        );
+
+        let mut traits_obj = serde_json::json!({
+            "email": email
+        });
+
+        if let Value::Object(ref mut map) = traits_obj {
+            if let Value::Object(additional) = traits {
+                map.extend(additional);
+            }
+        }
+
+        let body = serde_json::json!({
+            "method": "password",
+            "password": password,
+            "traits": traits_obj
+        });
+
+        let mut request = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body);
+
+        if let Some(cookie) = cookie {
+            request = request.header("Cookie", cookie);
+        }
+
+        let response = request.send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AuthError::KratosError(format!(
+                "Registration failed: {} - {}",
+                status, text
+            )));
+        }
+
+        let response_body: Value = response.json().await?;
+
+        tracing::debug!(
+            "Registration response: {}",
+            serde_json::to_string_pretty(&response_body).unwrap_or_default()
+        );
+
+        // Извлекаем session_token с верхнего уровня
+        let session_token = response_body
+            .get("session_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Проверяем наличие session
+        if let Some(session_data) = response_body.get("session") {
+            let session: Session = serde_json::from_value(session_data.clone())?;
+            tracing::info!("Session created with token: {}", session_token.is_some());
+            Ok((session.identity.clone(), Some(session), session_token))
+        } else if let Some(identity_data) = response_body.get("identity") {
+            let identity: Identity = serde_json::from_value(identity_data.clone())?;
+            tracing::warn!("No session in response, only identity");
+            Ok((identity, None, session_token))
+        } else {
+            Err(AuthError::KratosError(
+                "Unexpected response format: no session or identity found".to_string(),
+            ))
+        }
+    }
+
+    async fn create_login_flow(&self, cookie: Option<String>) -> Result<Value, AuthError> {
+        let url = format!("{}/self-service/login/api", self.base_url);
+
+        let mut request = self.client.get(&url);
+
+        if let Some(cookie) = cookie {
+            request = request.header("Cookie", cookie);
+        }
+
+        let response = request.send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AuthError::KratosError(format!(
+                "Failed to create login flow: {} - {}",
+                status, text
+            )));
+        }
+
+        let flow: Value = response.json().await?;
+        Ok(flow)
+    }
+
+    async fn submit_login(
+        &self,
+        flow_id: &str,
+        identifier: String,
+        password: String,
+        cookie: Option<String>,
+    ) -> Result<(Session, Option<String>), AuthError> {
+        let url = format!("{}/self-service/login?flow={}", self.base_url, flow_id);
+
+        let body = serde_json::json!({
+            "method": "password",
+            "identifier": identifier,
+            "password": password
+        });
+
+        let mut request = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body);
+
+        if let Some(cookie) = cookie {
+            request = request.header("Cookie", cookie);
+        }
+
+        let response = request.send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AuthError::KratosError(format!(
+                "Login failed: {} - {}",
+                status, text
+            )));
+        }
+
+        let response_body: Value = response.json().await?;
+
+        tracing::debug!(
+            "Login response: {}",
+            serde_json::to_string_pretty(&response_body).unwrap_or_default()
+        );
+
+        // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: session_token на верхнем уровне ответа
+        let session_token = response_body
+            .get("session_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let session: Session = if let Some(session_data) = response_body.get("session") {
+            serde_json::from_value(session_data.clone())?
+        } else {
+            serde_json::from_value(response_body)?
+        };
+
+        tracing::info!(
+            "Login successful, token present: {}",
+            session_token.is_some()
+        );
+
+        Ok((session, session_token))
+    }
+
+    async fn logout_session(&self, token: String) -> Result<(), AuthError> {
+        let url = format!("{}/self-service/logout/api", self.base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Session-Token", token.clone())
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(AuthError::KratosError(
+                "Failed to get logout token".to_string(),
+            ));
+        }
+
+        let logout_data: Value = response.json().await?;
+
+        if let Some(logout_token) = logout_data.get("logout_token").and_then(|v| v.as_str()) {
+            let logout_url = format!(
+                "{}/self-service/logout?token={}",
+                self.base_url, logout_token
+            );
+
+            let logout_response = self
+                .client
+                .get(&logout_url)
+                .header("X-Session-Token", token)
+                .send()
+                .await?;
+
+            if !logout_response.status().is_success() {
+                return Err(AuthError::KratosError("Logout failed".to_string()));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn get_session(&self, token: String) -> Result<Session, AuthError> {
+        let url = format!("{}/sessions/whoami", self.base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Session-Token", token)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(AuthError::Unauthorized);
+        }
+
+        let session: Session = response.json().await?;
+        Ok(session)
+    }
+}
+
+// ============================================================================
+// Use Cases
+// ============================================================================
+
 pub struct Signup {
     email: String,
     password: String,
-    traits: serde_json::Value,
+    traits: Value,
     cookie: Option<String>,
-    config: KratosConfig,
 }
 
 impl Signup {
-    pub fn new(
-        email: String,
-        password: String,
-        traits: serde_json::Value,
-        cookie: Option<String>,
-    ) -> Self {
+    pub fn new(email: String, password: String, traits: Value, cookie: Option<String>) -> Self {
         Self {
             email,
             password,
             traits,
             cookie,
-            config: KratosConfig::default(),
         }
     }
 
-    pub async fn execute(&self) -> Result<RegistrationResponse, Box<dyn std::error::Error>> {
-        let configuration = self.config.get_configuration();
-
-        tracing::info!("📝 Starting registration for email: {}", self.email);
-        tracing::debug!("Cookie present: {}", self.cookie.is_some());
-
-        // 1. Создаем registration flow
-        tracing::info!("🔄 Creating browser registration flow...");
-        let flow = match create_browser_registration_flow(
-            &configuration,
-            None,
-            None,
-            self.cookie.as_deref(),
-            None,
-        )
-        .await
-        {
-            Ok(f) => {
-                tracing::info!("✅ Registration flow created: {}", f.id);
-                tracing::debug!("Flow details: {:?}", f);
-                f
-            }
-            Err(e) => {
-                tracing::error!("❌ Failed to create registration flow: {:?}", e);
-                return Err(Box::new(e));
-            }
-        };
-
-        // 2. Подготавливаем traits
-        let mut traits_map = serde_json::Map::new();
-        traits_map.insert(
-            "email".to_string(),
-            serde_json::Value::String(self.email.clone()),
-        );
-
-        if let serde_json::Value::Object(extra_traits) = &self.traits {
-            for (k, v) in extra_traits {
-                if k != "email" && k != "password" {
-                    traits_map.insert(k.clone(), v.clone());
-                }
-            }
+    pub async fn execute(self) -> Result<SignupResponse, AuthError> {
+        if self.email.is_empty() {
+            return Err(AuthError::ValidationError("Email is required".to_string()));
         }
 
-        tracing::debug!("📋 Prepared traits: {:?}", traits_map);
-
-        // 3. Формируем body для регистрации
-        let body_json = json!({
-            "method": "password",
-            "password": self.password,
-            "traits": serde_json::Value::Object(traits_map.clone()),
-        });
-        tracing::debug!(
-            "📦 Request body (without password): {:?}",
-            json!({
-                "method": "password",
-                "password": "***",
-                "traits": serde_json::Value::Object(traits_map.clone()),
-            })
-        );
-        let update_body: UpdateRegistrationFlowBody = serde_json::from_value(body_json)?;
-
-        // 4. Завершаем регистрацию
-        tracing::info!("🚀 Submitting registration flow: {}", flow.id);
-        let response = match update_registration_flow(
-            &configuration,
-            &flow.id,
-            update_body,
-            self.cookie.as_deref(),
-        )
-        .await
-        {
-            Ok(r) => {
-                tracing::info!("✅ Registration completed successfully");
-                tracing::debug!("Response: {:?}", r);
-                r
-            }
-            Err(e) => {
-                tracing::error!("❌ Failed to update registration flow: {:?}", e);
-                tracing::error!("Flow ID was: {}", flow.id);
-                return Err(Box::new(e));
-            }
-        };
-
-        // 5. Извлекаем session cookie из response headers (если есть)
-        let session_cookie = response.session_token.clone();
-
-        if session_cookie.is_some() {
-            tracing::info!("🍪 Session cookie received");
-        } else {
-            tracing::warn!("⚠️ No session cookie in response");
+        if self.password.len() < 8 {
+            return Err(AuthError::ValidationError(
+                "Password must be at least 8 characters".to_string(),
+            ));
         }
 
-        Ok(RegistrationResponse {
-            identity: serde_json::to_value(&response.identity)?,
-            session_cookie,
+        let client = KratosClient::new();
+        let flow = client.create_registration_flow(self.cookie.clone()).await?;
+
+        let flow_id = flow
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AuthError::KratosError("Missing flow id".to_string()))?;
+
+        let (identity, session, session_token) = client
+            .submit_registration(flow_id, self.email, self.password, self.traits, self.cookie)
+            .await?;
+
+        Ok(SignupResponse {
+            identity,
+            session,
+            session_token,
         })
     }
 }
 
-// Объединенный use case для логина
 pub struct Login {
     identifier: String,
     password: String,
     cookie: Option<String>,
-    config: KratosConfig,
 }
 
 impl Login {
@@ -187,229 +411,83 @@ impl Login {
             identifier,
             password,
             cookie,
-            config: KratosConfig::default(),
         }
     }
 
-    pub async fn execute(&self) -> Result<LoginResponse, Box<dyn std::error::Error>> {
-        let configuration = self.config.get_configuration();
+    pub async fn execute(self) -> Result<LoginResponse, AuthError> {
+        if self.identifier.is_empty() {
+            return Err(AuthError::ValidationError(
+                "Identifier is required".to_string(),
+            ));
+        }
 
-        tracing::info!("🔐 Starting login for identifier: {}", self.identifier);
+        if self.password.is_empty() {
+            return Err(AuthError::ValidationError(
+                "Password is required".to_string(),
+            ));
+        }
 
-        // 1. Создаем login flow
-        tracing::info!("🔄 Creating browser login flow...");
-        let flow = match create_browser_login_flow(
-            &configuration,
-            None,
-            None,
-            None,
-            self.cookie.as_deref(),
-            None,
-            None,
-            None,
-        )
-        .await
-        {
-            Ok(f) => {
-                tracing::info!("✅ Login flow created: {}", f.id);
-                f
-            }
-            Err(e) => {
-                tracing::error!("❌ Failed to create login flow: {:?}", e);
-                return Err(Box::new(e));
-            }
-        };
+        let client = KratosClient::new();
+        let flow = client.create_login_flow(self.cookie.clone()).await?;
 
-        // 2. Формируем body для логина
-        let body_json = json!({
-            "method": "password",
-            "identifier": self.identifier,
-            "password": self.password,
-        });
+        let flow_id = flow
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AuthError::KratosError("Missing flow id".to_string()))?;
 
-        let update_body: UpdateLoginFlowBody = serde_json::from_value(body_json)?;
-
-        // 3. Завершаем логин
-        tracing::info!("🚀 Submitting login flow: {}", flow.id);
-        let response = match update_login_flow(
-            &configuration,
-            &flow.id,
-            update_body,
-            None,
-            self.cookie.as_deref(),
-        )
-        .await
-        {
-            Ok(r) => {
-                tracing::info!("✅ Login completed successfully");
-                r
-            }
-            Err(e) => {
-                tracing::error!("❌ Failed to update login flow: {:?}", e);
-                return Err(Box::new(e));
-            }
-        };
-
-        // 4. Извлекаем session cookie
-        let session_cookie = response.session_token.clone();
+        let (session, session_token) = client
+            .submit_login(flow_id, self.identifier, self.password, self.cookie)
+            .await?;
 
         Ok(LoginResponse {
-            session: serde_json::to_value(&response.session)?,
-            session_cookie,
+            session,
+            session_token,
         })
     }
 }
 
-pub struct GetSession {
-    cookie: String,
-    config: KratosConfig,
-}
-
-impl GetSession {
-    pub fn new(cookie: String) -> Self {
-        Self {
-            cookie,
-            config: KratosConfig::default(),
-        }
-    }
-
-    pub async fn execute(&self) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        let configuration = self.config.get_configuration();
-
-        tracing::info!("👤 Getting session info");
-
-        let session = match to_session(&configuration, None, Some(&self.cookie), None).await {
-            Ok(s) => {
-                tracing::info!("✅ Session retrieved successfully");
-                s
-            }
-            Err(e) => {
-                tracing::error!("❌ Failed to get session: {:?}", e);
-                return Err(Box::new(e));
-            }
-        };
-
-        Ok(serde_json::to_value(session)?)
-    }
-}
-
 pub struct Logout {
-    cookie: String,
-    config: KratosConfig,
+    token: String,
 }
 
 impl Logout {
-    pub fn new(cookie: String) -> Self {
-        Self {
-            cookie,
-            config: KratosConfig::default(),
-        }
+    pub fn new(token: String) -> Self {
+        Self { token }
     }
 
-    pub async fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let configuration = self.config.get_configuration();
+    pub async fn execute(self) -> Result<(), AuthError> {
+        if self.token.is_empty() {
+            return Err(AuthError::ValidationError(
+                "Session token is required".to_string(),
+            ));
+        }
 
-        tracing::info!("🚪 Starting logout");
+        let client = KratosClient::new();
+        client.logout_session(self.token).await?;
 
-        // Создаем logout flow
-        let _logout_flow =
-            match create_browser_logout_flow(&configuration, Some(&self.cookie), None).await {
-                Ok(f) => {
-                    tracing::info!("✅ Logout flow created successfully");
-                    f
-                }
-                Err(e) => {
-                    tracing::error!("❌ Failed to create logout flow: {:?}", e);
-                    return Err(Box::new(e));
-                }
-            };
-
-        // В Kratos logout происходит автоматически при создании logout flow
         Ok(())
     }
 }
 
-pub struct InitiateRecovery {
-    cookie: Option<String>,
-    config: KratosConfig,
+pub struct GetSession {
+    token: String,
 }
 
-impl InitiateRecovery {
-    pub fn new(cookie: Option<String>) -> Self {
-        Self {
-            cookie,
-            config: KratosConfig::default(),
+impl GetSession {
+    pub fn new(token: String) -> Self {
+        Self { token }
+    }
+
+    pub async fn execute(self) -> Result<Session, AuthError> {
+        if self.token.is_empty() {
+            return Err(AuthError::ValidationError(
+                "Session token is required".to_string(),
+            ));
         }
-    }
 
-    pub async fn execute(&self) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        let configuration = self.config.get_configuration();
+        let client = KratosClient::new();
+        let session = client.get_session(self.token).await?;
 
-        tracing::info!("🔑 Initiating password recovery");
-
-        let flow = match create_browser_recovery_flow(&configuration, None).await {
-            Ok(f) => {
-                tracing::info!("✅ Recovery flow created: {}", f.id);
-                f
-            }
-            Err(e) => {
-                tracing::error!("❌ Failed to create recovery flow: {:?}", e);
-                return Err(Box::new(e));
-            }
-        };
-
-        Ok(serde_json::to_value(flow)?)
-    }
-}
-
-pub struct CompleteRecovery {
-    flow_id: String,
-    email: String,
-    cookie: Option<String>,
-    config: KratosConfig,
-}
-
-impl CompleteRecovery {
-    pub fn new(flow_id: String, email: String, cookie: Option<String>) -> Self {
-        Self {
-            flow_id,
-            email,
-            cookie,
-            config: KratosConfig::default(),
-        }
-    }
-
-    pub async fn execute(&self) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        let configuration = self.config.get_configuration();
-
-        tracing::info!("🔑 Completing password recovery for: {}", self.email);
-
-        let body_json = json!({
-            "method": "link",
-            "email": self.email,
-        });
-
-        let update_body: UpdateRecoveryFlowBody = serde_json::from_value(body_json)?;
-
-        let response = match update_recovery_flow(
-            &configuration,
-            &self.flow_id,
-            update_body,
-            None,
-            self.cookie.as_deref(),
-        )
-        .await
-        {
-            Ok(r) => {
-                tracing::info!("✅ Recovery flow completed");
-                r
-            }
-            Err(e) => {
-                tracing::error!("❌ Failed to complete recovery flow: {:?}", e);
-                return Err(Box::new(e));
-            }
-        };
-
-        Ok(serde_json::to_value(response)?)
+        Ok(session)
     }
 }

@@ -1,2 +1,2 @@
 pub mod auth;
-pub use auth::{CompleteRecovery, GetSession, InitiateRecovery, Login, Logout, Signup};
+pub use auth::{GetSession, Login, Logout, Signup};

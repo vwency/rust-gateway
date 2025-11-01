@@ -1,12 +1,11 @@
-use crate::application::usecases::auth::{
-    CompleteRecovery, GetSession, InitiateRecovery, Login, Logout, Signup,
-};
+use crate::application::usecases::auth::{GetSession, Login, Logout, Signup};
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 #[derive(Debug, Deserialize)]
 pub struct LoginDto {
+    #[serde(alias = "email")]
     pub identifier: String,
     pub password: String,
 }
@@ -18,20 +17,8 @@ pub struct AuthDto {
     #[serde(flatten)]
     pub traits: serde_json::Value,
 }
-
-#[derive(Debug, Deserialize)]
-pub struct RecoveryDto {
-    pub email: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FlowIdQuery {
-    pub flow: String,
-}
-
-// POST /auth/register - Регистрация нового пользователя
 #[post("/auth/register")]
-#[instrument]
+#[instrument(skip(data, req))]
 async fn signup(data: web::Json<AuthDto>, req: HttpRequest) -> impl Responder {
     let cookie = req
         .headers()
@@ -50,31 +37,52 @@ async fn signup(data: web::Json<AuthDto>, req: HttpRequest) -> impl Responder {
         Ok(response) => {
             let mut http_response = HttpResponse::Created();
 
-            if let Some(session_cookie) = response.session_cookie {
+            // Токен должен быть в response.session_token, а не в session
+            if let Some(token) = &response.session_token {
                 http_response.append_header((
                     "Set-Cookie",
                     format!(
-                        "ory_kratos_session={}; Path=/; HttpOnly; Secure; SameSite=Lax",
-                        session_cookie
+                        "session_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
+                        token
                     ),
                 ));
+                tracing::info!(
+                    "✅ Session token set for new user: {}",
+                    response.identity.id
+                );
+            } else {
+                tracing::warn!("⚠️ No session token returned after registration");
             }
 
-            http_response.json(response.identity)
+            http_response.json(serde_json::json!({
+                "identity": response.identity,
+                "session": response.session,
+                "message": "Registration successful"
+            }))
         }
         Err(e) => {
             tracing::error!("Failed to complete registration: {:?}", e);
-            HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Registration failed",
-                "details": e.to_string()
-            }))
+
+            let error_string = e.to_string();
+            if error_string.contains("missing field") && error_string.contains("node_type") {
+                HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Authentication service configuration error",
+                    "message": "SDK version mismatch with Kratos server",
+                    "solution": "Update ory_kratos_client crate to match server version",
+                    "technical_details": error_string
+                }))
+            } else {
+                HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Registration failed",
+                    "details": error_string
+                }))
+            }
         }
     }
 }
 
-// POST /auth/login - Вход в систему
 #[post("/auth/login")]
-#[instrument]
+#[instrument(skip(data, req))]
 async fn login(data: web::Json<LoginDto>, req: HttpRequest) -> impl Responder {
     let cookie = req
         .headers()
@@ -88,51 +96,74 @@ async fn login(data: web::Json<LoginDto>, req: HttpRequest) -> impl Responder {
         Ok(response) => {
             let mut http_response = HttpResponse::Ok();
 
-            if let Some(session_cookie) = response.session_cookie {
+            if let Some(token) = response.session_token {
                 http_response.append_header((
                     "Set-Cookie",
                     format!(
-                        "ory_kratos_session={}; Path=/; HttpOnly; Secure; SameSite=Lax",
-                        session_cookie
+                        "session_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
+                        token
                     ),
                 ));
+                tracing::info!("✅ Session token set successfully");
+            } else {
+                tracing::warn!("⚠️ No session token received from Kratos");
             }
 
-            http_response.json(response.session)
+            http_response.json(serde_json::json!({
+                "session": response.session,
+                "message": "Login successful"
+            }))
         }
         Err(e) => {
             tracing::error!("Failed to complete login: {:?}", e);
-            HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Login failed",
-                "details": e.to_string()
-            }))
+
+            let error_string = e.to_string();
+            if error_string.contains("missing field") && error_string.contains("node_type") {
+                HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Authentication service configuration error",
+                    "message": "SDK version mismatch with Kratos server"
+                }))
+            } else {
+                HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Login failed",
+                    "details": error_string
+                }))
+            }
         }
     }
 }
 
-// POST /auth/logout - Выход из системы
 #[post("/auth/logout")]
-#[instrument]
+#[instrument(skip(req))]
 async fn logout(req: HttpRequest) -> impl Responder {
-    let cookie = req
+    // Извлекаем токен из cookie
+    let token = req
         .headers()
         .get("Cookie")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .and_then(|cookie_str| {
+            for cookie in cookie_str.split(';') {
+                let cookie = cookie.trim();
+                if let Some(value) = cookie.strip_prefix("session_token=") {
+                    return Some(value.to_string());
+                }
+            }
+            None
+        });
 
-    if cookie.is_none() {
+    if token.is_none() {
         return HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "No session cookie found"
+            "error": "No session token found"
         }));
     }
 
-    let use_case = Logout::new(cookie.unwrap());
+    let use_case = Logout::new(token.unwrap());
 
     match use_case.execute().await {
         Ok(_) => HttpResponse::Ok()
             .append_header((
                 "Set-Cookie",
-                "ory_kratos_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
+                "session_token=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
             ))
             .json(serde_json::json!({
                 "message": "Logged out successfully"
@@ -140,86 +171,52 @@ async fn logout(req: HttpRequest) -> impl Responder {
         Err(e) => {
             tracing::error!("Failed to logout: {:?}", e);
             HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Logout failed"
+                "error": "Logout failed",
+                "details": e.to_string()
             }))
         }
     }
 }
 
-// GET /auth/me - Получить информацию о текущем пользователе
 #[get("/auth/me")]
-#[instrument]
+#[instrument(skip(req))]
 async fn get_current_user(req: HttpRequest) -> impl Responder {
-    let cookie = req
+    // Ищем токен в cookie или Authorization header
+    let token = req
         .headers()
         .get("Cookie")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .and_then(|cookie_str| {
+            for cookie in cookie_str.split(';') {
+                let cookie = cookie.trim();
+                if let Some(value) = cookie.strip_prefix("session_token=") {
+                    return Some(value.to_string());
+                }
+            }
+            None
+        })
+        .or_else(|| {
+            req.headers()
+                .get("Authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|auth| auth.strip_prefix("Bearer "))
+                .map(|t| t.to_string())
+        });
 
-    if cookie.is_none() {
+    if token.is_none() {
         return HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "No session cookie found"
+            "error": "No session token found"
         }));
     }
 
-    let use_case = GetSession::new(cookie.unwrap());
+    let use_case = GetSession::new(token.unwrap());
 
     match use_case.execute().await {
         Ok(session) => HttpResponse::Ok().json(session),
         Err(e) => {
             tracing::error!("Failed to get session: {:?}", e);
             HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid or expired session"
-            }))
-        }
-    }
-}
-
-// GET /auth/recovery - Инициация восстановления пароля
-#[get("/auth/recovery")]
-#[instrument]
-async fn init_recovery(req: HttpRequest) -> impl Responder {
-    let cookie = req
-        .headers()
-        .get("Cookie")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let use_case = InitiateRecovery::new(cookie);
-
-    match use_case.execute().await {
-        Ok(flow) => HttpResponse::Ok().json(flow),
-        Err(e) => {
-            tracing::error!("Failed to initiate recovery: {:?}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to initiate recovery flow"
-            }))
-        }
-    }
-}
-
-// POST /auth/recovery - Завершение восстановления пароля
-#[post("/auth/recovery")]
-#[instrument]
-async fn complete_recovery(
-    query: web::Query<FlowIdQuery>,
-    data: web::Json<RecoveryDto>,
-    req: HttpRequest,
-) -> impl Responder {
-    let cookie = req
-        .headers()
-        .get("Cookie")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let use_case = CompleteRecovery::new(query.flow.clone(), data.email.clone(), cookie);
-
-    match use_case.execute().await {
-        Ok(flow) => HttpResponse::Ok().json(flow),
-        Err(e) => {
-            tracing::error!("Failed to complete recovery: {:?}", e);
-            HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Recovery failed",
+                "error": "Invalid or expired session",
                 "details": e.to_string()
             }))
         }
@@ -230,7 +227,5 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(signup)
         .service(login)
         .service(logout)
-        .service(get_current_user)
-        .service(init_recovery)
-        .service(complete_recovery);
+        .service(get_current_user);
 }

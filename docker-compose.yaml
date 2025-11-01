@@ -21,7 +21,7 @@ services:
 
   # Миграции базы данных Kratos
   kratos-migrate:
-    image: oryd/kratos:v1.0.0
+    image: oryd/kratos:v1.3.0
     container_name: kratos-migrate
     environment:
       DSN: postgres://kratos:kratos_secret@postgres-kratos:5432/kratos?sslmode=disable
@@ -37,7 +37,7 @@ services:
 
   # Ory Kratos
   kratos:
-    image: oryd/kratos:v1.0.0
+    image: oryd/kratos:v1.3.0
     container_name: kratos
     environment:
       DSN: postgres://kratos:kratos_secret@postgres-kratos:5432/kratos?sslmode=disable

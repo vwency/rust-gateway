@@ -1,4 +1,4 @@
-version: v1.0.0
+version: v1.3.0
 
 dsn: postgres://kratos:kratos_secret@postgres-kratos:5432/kratos?sslmode=disable
 
@@ -8,7 +8,6 @@ serve:
     cors:
       enabled: true
       allowed_origins:
-        - http://localhost:3000
         - http://localhost:8080
       allowed_methods:
         - POST
@@ -44,13 +43,18 @@ session:
     required_aal: aal1
 
 selfservice:
-  default_browser_return_url: http://localhost:3000/
+  default_browser_return_url: http://localhost:8080/
   allowed_return_urls:
-    - http://localhost:3000
+    - http://localhost:8080
 
   methods:
     password:
       enabled: true
+      config:
+        haveibeenpwned_enabled: false
+        min_password_length: 8
+        identifier_similarity_check_enabled: true
+        
     totp:
       config:
         issuer: MyApp
@@ -62,38 +66,42 @@ selfservice:
 
   flows:
     error:
-      ui_url: http://localhost:3000/error
+      ui_url: http://localhost:8080/error
 
     settings:
-      ui_url: http://localhost:3000/settings
+      ui_url: http://localhost:8080/settings
       privileged_session_max_age: 15m
       required_aal: highest_available
 
     recovery:
       enabled: true
-      ui_url: http://localhost:3000/recovery
+      ui_url: http://localhost:8080/recovery
       use: link
 
     verification:
-      enabled: true
-      ui_url: http://localhost:3000/verification
+      enabled: false  # Отключаем верификацию для автоматического создания сессии
+      ui_url: http://localhost:8080/verification
       use: link
-      after:
-        default_browser_return_url: http://localhost:3000/
 
     logout:
       after:
-        default_browser_return_url: http://localhost:3000/login
+        default_browser_return_url: http://localhost:8080/login
 
     login:
-      ui_url: http://localhost:3000/login
+      ui_url: http://localhost:8080/login
       lifespan: 10m
-      # Убрали секцию after - сессия создается автоматически
+      after:
+        password:
+          hooks:
+            - hook: session  # Создаем сессию после логина
 
     registration:
       lifespan: 10m
-      ui_url: http://localhost:3000/registration
-      # Убрали секцию after - сессия создается автоматически
+      ui_url: http://localhost:8080/registration
+      after:
+        password:
+          hooks:
+            - hook: session  # КЛЮЧЕВОЕ: автоматически создаем сессию после регистрации
 
 log:
   level: debug
