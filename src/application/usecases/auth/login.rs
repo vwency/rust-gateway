@@ -8,6 +8,7 @@ impl LoginUseCase {
     pub async fn execute(
         input: LoginInput,
         kratos_client: &KratosClient,
+        cookie: Option<&str>,
     ) -> Result<AuthResponse, String> {
         Self::validate_input(&input)?;
 
@@ -18,7 +19,7 @@ impl LoginUseCase {
             .ok_or("Email or username required")?;
 
         let session = kratos_client
-            .login(identifier, &input.password)
+            .login(identifier, &input.password, cookie)
             .await
             .map_err(|e| format!("Login failed: {}", e))?;
 

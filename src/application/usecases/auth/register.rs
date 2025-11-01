@@ -19,6 +19,7 @@ impl RegisterUseCase {
     pub async fn execute(
         input: RegisterInput,
         kratos_client: &KratosClient,
+        cookie: Option<&str>,
     ) -> Result<AuthResponse, String> {
         Self::validate_input(&input)?;
 
@@ -28,6 +29,7 @@ impl RegisterUseCase {
                 &input.username,
                 &input.password,
                 input.geo_location.as_deref(),
+                cookie,
             )
             .await
             .map_err(|e| format!("Failed to register: {}", e))?;

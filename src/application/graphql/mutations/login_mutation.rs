@@ -18,7 +18,9 @@ impl LoginMutation {
             )
         });
 
-        let auth_response = LoginUseCase::execute(input, &kratos_client)
+        let cookie = ctx.data_opt::<String>().map(|s| s.as_str());
+
+        let auth_response = LoginUseCase::execute(input, &kratos_client, cookie)
             .await
             .map_err(|e| async_graphql::Error::new(e))?;
 
