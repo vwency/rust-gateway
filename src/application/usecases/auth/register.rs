@@ -23,19 +23,17 @@ impl RegisterUseCase {
     ) -> Result<AuthResponse, String> {
         Self::validate_input(&input)?;
 
-        let (identity, session) = kratos_client
-            .register(
-                &input.email,
-                &input.username,
-                &input.password,
-                input.geo_location.as_deref(),
-                cookie,
-            )
+        let (session, cookies) = kratos_client
+            .handle_signup(&input.email, &input.username, &input.password, cookie)
             .await
             .map_err(|e| format!("Failed to register: {}", e))?;
 
-        let session_token = session.token.clone();
-        Ok(AuthResponse::from_kratos_identity(identity, session_token))
+        let session_token = cookies.get(0).cloned().unwrap_or_default();
+
+        Ok(AuthResponse::from_kratos_identity(
+            session.identity,
+            session_token,
+        ))
     }
 
     fn validate_input(input: &RegisterInput) -> Result<(), String> {

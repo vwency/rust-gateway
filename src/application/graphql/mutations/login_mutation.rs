@@ -20,17 +20,14 @@ impl LoginMutation {
 
         let cookie = ctx.data_opt::<String>().map(|s| s.as_str());
 
-        let auth_response = LoginUseCase::execute(input, &kratos_client, cookie)
+        let (auth_response, cookies) = LoginUseCase::execute(input, &kratos_client, cookie)
             .await
             .map_err(|e| async_graphql::Error::new(e))?;
 
         if let Some(response_cookies) = ctx.data_opt::<ResponseCookies>() {
-            let cookie = format!(
-                "ory_kratos_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-                auth_response.session_token,
-                60 * 60 * 24 * 7
-            );
-            response_cookies.add_cookie(cookie).await;
+            for cookie_str in cookies {
+                response_cookies.add_cookie(cookie_str).await;
+            }
         }
 
         Ok(auth_response)

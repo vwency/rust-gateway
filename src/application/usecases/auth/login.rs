@@ -9,8 +9,15 @@ impl LoginUseCase {
         input: LoginInput,
         kratos_client: &KratosClient,
         cookie: Option<&str>,
-    ) -> Result<AuthResponse, String> {
+    ) -> Result<(AuthResponse, Vec<String>), String> {
         Self::validate_input(&input)?;
+
+        // Проверяем, не авторизован ли пользователь уже
+        if let Some(existing_cookie) = cookie {
+            if let Ok(_) = kratos_client.handle_get_current_user(existing_cookie).await {
+                return Err("Already logged in. Please logout first.".to_string());
+            }
+        }
 
         let identifier = input
             .email
@@ -18,18 +25,16 @@ impl LoginUseCase {
             .or(input.username.as_ref())
             .ok_or("Email or username required")?;
 
-        let session = kratos_client
-            .login(identifier, &input.password, cookie)
+        let (session, cookies) = kratos_client
+            .handle_login(identifier, &input.password, cookie)
             .await
             .map_err(|e| format!("Login failed: {}", e))?;
 
-        let identity = kratos_client
-            .get_identity(&session.identity_id)
-            .await
-            .map_err(|e| format!("Failed to get identity: {}", e))?;
-
-        let session_token = session.token.clone();
-        Ok(AuthResponse::from_kratos_identity(identity, session_token))
+        // Возвращаем все cookies, которые вернул Kratos
+        Ok((
+            AuthResponse::from_kratos_identity(session.identity, String::new()),
+            cookies,
+        ))
     }
 
     fn validate_input(input: &LoginInput) -> Result<(), String> {
