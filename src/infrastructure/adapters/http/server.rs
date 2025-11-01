@@ -1,37 +1,29 @@
 use actix_cors::Cors;
-use actix_web::{App, HttpServer, web};
-use std::sync::Arc;
+use actix_web::{App, HttpServer};
 use tracing::info;
 use tracing_actix_web::TracingLogger;
 
-use crate::application::handlers::health_check as handlers;
-use crate::infrastructure::adapters::graphql::handlers::{graphql_handler, graphql_playground};
-use crate::infrastructure::adapters::graphql::schema::AppSchema;
+use crate::application::handlers::{auth, health_check};
 
-pub async fn start(schema: Arc<AppSchema>) -> std::io::Result<()> {
-    info!("Booting HTTP server at http://127.0.0.1:8080");
+pub async fn start() -> std::io::Result<()> {
+    info!("Booting HTTP server at http://127.0.0.1:3000");
 
-    let server = HttpServer::new(move || {
+    let server = HttpServer::new(|| {
         App::new()
             .wrap(TracingLogger::default())
             .wrap(
                 Cors::default()
                     .allow_any_origin()
                     .allow_any_method()
-                    .allow_any_header(),
+                    .allow_any_header()
+                    .supports_credentials(),
             )
-            .app_data(web::Data::from(schema.clone()))
-            .service(
-                web::resource("/graphql")
-                    .route(web::post().to(graphql_handler))
-                    .route(web::get().to(graphql_playground)),
-            )
-            .configure(handlers::configure)
+            .configure(health_check::configure)
+            .configure(auth::configure)
     })
-    .bind(("127.0.0.1", 8080))?;
+    .bind(("127.0.0.1", 3000))?;
 
-    info!("✅ HTTP server successfully started on http://127.0.0.1:8080");
-    info!("🚀 GraphQL Playground: http://127.0.0.1:8080/graphql");
+    info!("✅ HTTP server successfully started on http://127.0.0.1:3000");
 
     server.run().await
 }
