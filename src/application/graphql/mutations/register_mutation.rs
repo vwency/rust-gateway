@@ -18,15 +18,15 @@ impl RegisterMutation {
             )
         });
 
-        let (auth_response, session_token) = RegisterUseCase::execute(input, &kratos_client)
+        let auth_response = RegisterUseCase::execute(input, &kratos_client)
             .await
             .map_err(|e| async_graphql::Error::new(e))?;
 
         if let Some(response_cookies) = ctx.data_opt::<ResponseCookies>() {
             let cookie = format!(
                 "ory_kratos_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-                session_token,
-                60 * 60 * 24 * 7 // 7 дней
+                auth_response.session_token,
+                60 * 60 * 24 * 7
             );
             response_cookies.add_cookie(cookie).await;
         }
