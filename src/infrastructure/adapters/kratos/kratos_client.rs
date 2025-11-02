@@ -67,7 +67,6 @@ impl KratosClient {
         }
     }
 
-    /// Проверяет, есть ли активная сессия
     async fn check_active_session(&self, cookie: Option<&str>) -> bool {
         if let Some(cookie_value) = cookie {
             if let Ok(_) = self.handle_get_current_user(cookie_value).await {
@@ -273,6 +272,46 @@ impl KratosClient {
         })
     }
 
+    fn parse_identity(
+        data: &serde_json::Value,
+    ) -> Result<KratosIdentity, Box<dyn std::error::Error>> {
+        let identity_data = data
+            .get("identity")
+            .ok_or("Identity not found in response")?;
+
+        Ok(KratosIdentity {
+            id: identity_data["id"]
+                .as_str()
+                .ok_or("Identity ID not found")?
+                .to_string(),
+            schema_id: identity_data["schema_id"]
+                .as_str()
+                .unwrap_or("default")
+                .to_string(),
+            traits: IdentityTraits {
+                email: identity_data["traits"]["email"]
+                    .as_str()
+                    .ok_or("Email not found")?
+                    .to_string(),
+                username: identity_data["traits"]["username"]
+                    .as_str()
+                    .ok_or("Username not found")?
+                    .to_string(),
+                geo_location: identity_data["traits"]["geo_location"]
+                    .as_str()
+                    .map(|s| s.to_string()),
+            },
+            created_at: identity_data["created_at"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            updated_at: identity_data["updated_at"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+
     pub async fn handle_signup(
         &self,
         email: &str,
@@ -280,6 +319,12 @@ impl KratosClient {
         password: &str,
         cookie: Option<&str>,
     ) -> Result<(KratosSession, Vec<String>), Box<dyn std::error::Error>> {
+        if self.check_active_session(cookie).await {
+            return Err(Box::from(
+                "Already logged in. Please logout first before logging in again.",
+            ));
+        }
+
         let flow_result = self.fetch_flow("registration", cookie).await?;
 
         let registration_data = serde_json::json!({
@@ -301,50 +346,13 @@ impl KratosClient {
             )
             .await?;
 
-        let session_data = &post_result.data["session"];
+        let response_data = &post_result.data;
 
-        let identity = KratosIdentity {
-            id: session_data["identity"]["id"]
-                .as_str()
-                .ok_or("Identity ID not found")?
-                .to_string(),
-            schema_id: session_data["identity"]["schema_id"]
-                .as_str()
-                .unwrap_or("default")
-                .to_string(),
-            traits: IdentityTraits {
-                email: session_data["identity"]["traits"]["email"]
-                    .as_str()
-                    .ok_or("Email not found")?
-                    .to_string(),
-                username: session_data["identity"]["traits"]["username"]
-                    .as_str()
-                    .ok_or("Username not found")?
-                    .to_string(),
-                geo_location: session_data["identity"]["traits"]["geo_location"]
-                    .as_str()
-                    .map(|s| s.to_string()),
-            },
-            created_at: session_data["identity"]["created_at"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
-            updated_at: session_data["identity"]["updated_at"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
-        };
+        if response_data.get("identity").is_none() {
+            return Err("Registration failed: identity not found in response".into());
+        }
 
-        let session = KratosSession {
-            id: session_data["id"]
-                .as_str()
-                .ok_or("Session ID not found")?
-                .to_string(),
-            active: session_data["active"].as_bool().unwrap_or(false),
-            identity,
-        };
-
-        Ok((session, post_result.cookies))
+        self.handle_login(email, password, cookie).await
     }
 
     pub async fn handle_login(
@@ -353,7 +361,6 @@ impl KratosClient {
         password: &str,
         cookie: Option<&str>,
     ) -> Result<(KratosSession, Vec<String>), Box<dyn std::error::Error>> {
-        // Проверяем, есть ли активная сессия - проверяем ВСЕ куки, не только переданные
         if self.check_active_session(cookie).await {
             return Err(Box::from(
                 "Already logged in. Please logout first before logging in again.",
@@ -378,46 +385,32 @@ impl KratosClient {
             )
             .await?;
 
-        let session_data = &post_result.data["session"];
+        let response_data = &post_result.data;
 
-        let identity = KratosIdentity {
-            id: session_data["identity"]["id"]
+        let identity = if response_data.get("session").is_some() {
+            let session_data = &response_data["session"];
+            Self::parse_identity(session_data)?
+        } else if response_data.get("identity").is_some() {
+            Self::parse_identity(response_data)?
+        } else {
+            return Err("Invalid response format: neither 'session' nor 'identity' found".into());
+        };
+
+        let session_id = if let Some(session) = response_data.get("session") {
+            session["id"]
                 .as_str()
-                .ok_or("Identity ID not found")?
-                .to_string(),
-            schema_id: session_data["identity"]["schema_id"]
+                .ok_or("Session ID not found")?
+                .to_string()
+        } else {
+            response_data["id"]
                 .as_str()
-                .unwrap_or("default")
-                .to_string(),
-            traits: IdentityTraits {
-                email: session_data["identity"]["traits"]["email"]
-                    .as_str()
-                    .ok_or("Email not found")?
-                    .to_string(),
-                username: session_data["identity"]["traits"]["username"]
-                    .as_str()
-                    .ok_or("Username not found")?
-                    .to_string(),
-                geo_location: session_data["identity"]["traits"]["geo_location"]
-                    .as_str()
-                    .map(|s| s.to_string()),
-            },
-            created_at: session_data["identity"]["created_at"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
-            updated_at: session_data["identity"]["updated_at"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
+                .unwrap_or("temp_session")
+                .to_string()
         };
 
         let session = KratosSession {
-            id: session_data["id"]
-                .as_str()
-                .ok_or("Session ID not found")?
-                .to_string(),
-            active: session_data["active"].as_bool().unwrap_or(false),
+            id: session_id,
+            active: true,
             identity,
         };
 
@@ -532,15 +525,13 @@ impl KratosClient {
             .await
             .map_err(|e| format!("Failed to connect to whoami endpoint: {}", e))?;
 
-        let status = response.status(); // сохраняем статус ДО вызова text/json
+        let status = response.status();
 
-        // Обрабатываем стандартные случаи
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Ok(None);
         }
 
         if !status.is_success() {
-            // читаем тело ОТДЕЛЬНО, потому что `response` уже не нужен после этого
             let error_text = response
                 .text()
                 .await
@@ -552,7 +543,6 @@ impl KratosClient {
             .into());
         }
 
-        // Если успешный ответ
         let session_json: serde_json::Value = response.json().await?;
 
         let session = KratosSession {
